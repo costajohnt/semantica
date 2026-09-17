@@ -1,5 +1,6 @@
 """Tests for RelationalSchemaMapper (issue #1386, part 1)."""
 
+import logging
 import math
 from types import SimpleNamespace
 
@@ -258,6 +259,8 @@ def test_explicit_foreign_keys_override_schema_predicates():
     [
         lambda rows: SimpleNamespace(data=rows),  # SnowflakeData / DatabricksData
         lambda rows: SimpleNamespace(rows=rows),  # TableData (DBIngestor)
+        # DBIngestor.ingest_database()["tables"][name]
+        lambda rows: {"columns": list(rows[0]), "row_count": len(rows), "rows": rows},
         lambda rows: SimpleNamespace(dataframe=pd.DataFrame(rows)),  # PandasData
         lambda rows: pd.DataFrame(rows),
     ],
@@ -466,9 +469,29 @@ def test_composite_key_components_containing_the_separator_do_not_collide():
     mapper = RelationalSchemaMapper(
         entity_tables={"P": {"pk": ["A", "B"], "type": "Pair"}}
     )
-    rows = [{"A": "x|y", "B": "z"}, {"A": "x", "B": "y|z"}]
+    rows = [
+        {"A": "x|y", "B": "z"},
+        {"A": "x", "B": "y|z"},
+        {"A": "x\\", "B": "y|z"},
+        {"A": "x|y\\", "B": "z"},
+    ]
     ids = [e["id"] for e in mapper.map({"P": rows}, source="x")["entities"]]
-    assert len(set(ids)) == 2
+    assert len(set(ids)) == 4
+
+
+def test_relationship_targets_use_the_same_key_encoding_as_entity_ids():
+    mapper = RelationalSchemaMapper(
+        entity_tables={
+            "C": {"pk": "CODE", "type": "C"},
+            "O": {"pk": "ID", "type": "O"},
+        },
+        foreign_keys=[{"table": "O", "column": "CODE", "references": ("C", "CODE")}],
+    )
+    mapped = mapper.map(
+        {"C": [{"CODE": "a\\|b"}], "O": [{"ID": 1, "CODE": "a\\|b"}]}, source="x"
+    )
+    ids = {e["id"] for e in mapped["entities"]}
+    assert mapped["relationships"][0]["target"] in ids
 
 
 def test_metadata_is_skipped_by_the_ontology_property_generator():
@@ -587,6 +610,78 @@ def test_config_validation():
                 }
             ],
         )
+    # entity ids come from the primary key, so a key into any other column
+    # would point at an id that no row produces
+    with pytest.raises(ValueError, match="primary key"):
+        RelationalSchemaMapper(
+            entity_tables=ENTITY_TABLES,
+            foreign_keys=[
+                {
+                    "table": "ORDERS",
+                    "column": "CUSTOMER_EMAIL",
+                    "references": ("CUSTOMERS", "EMAIL"),
+                }
+            ],
+        )
+    with pytest.raises(ValueError, match="composite"):
+        RelationalSchemaMapper(
+            entity_tables={"LINES": {"pk": ["ORDER_ID", "LINE_NO"], "type": "Line"}},
+            foreign_keys=[
+                {
+                    "table": "SHIPMENTS",
+                    "column": "ORDER_ID",
+                    "references": ("LINES", "ORDER_ID"),
+                }
+            ],
+        )
+
+
+def test_schema_foreign_keys_to_non_primary_columns_are_skipped(caplog):
+    schema = {
+        "foreign_keys": [
+            {
+                "constrained_columns": ["CUSTOMER_EMAIL"],
+                "referred_table": "CUSTOMERS",
+                "referred_columns": ["EMAIL"],
+            }
+        ]
+    }
+    with caplog.at_level(logging.WARNING, logger="semantica.schema_mapper"):
+        mapper = RelationalSchemaMapper(entity_tables=ENTITY_TABLES, schema=schema)
+    orders = [{"ORDER_ID": 10, "CUSTOMER_EMAIL": "a@x"}]
+
+    mapped = mapper.map({"ORDERS": orders}, source="pg")
+
+    assert mapped["relationships"] == []
+    assert any("CUSTOMERS.EMAIL" in r.getMessage() for r in caplog.records)
+
+
+def test_empty_junction_table_with_schema_foreign_keys_maps_to_nothing():
+    schema = {
+        "foreign_keys": [
+            {
+                "table_name": "ORDER_ITEMS",
+                "constrained_columns": ["ORDER_ID"],
+                "referred_table": "ORDERS",
+                "referred_columns": ["ORDER_ID"],
+            },
+            {
+                "table_name": "ORDER_ITEMS",
+                "constrained_columns": ["PRODUCT_ID"],
+                "referred_table": "PRODUCTS",
+                "referred_columns": ["PRODUCT_ID"],
+            },
+        ]
+    }
+    mapper = RelationalSchemaMapper(entity_tables=ENTITY_TABLES, schema=schema)
+
+    assert mapper.map({"ORDER_ITEMS": []}, source="pg") == {
+        "entities": [],
+        "relationships": [],
+    }
+    # rows that exist but lack a declared key column are still a mismatch
+    with pytest.raises(ValueError, match="1 foreign key"):
+        mapper.map({"ORDER_ITEMS": [{"ORDER_ID": 10, "QUANTITY": 1}]}, source="pg")
 
 
 def test_output_feeds_graph_builder():

@@ -22,8 +22,9 @@ A junction relationship runs from the first foreign key listed to the second
 (explicit keys come before schema-derived ones); its predicate is the second
 key's, then the first's, then the table name.
 
-Entity ids are ``"<Type>:<pk>"``, so the same row ingested from two systems of
-record maps to the same id and the two copies can be compared for conflicts.
+Entity ids are ``"<Type>:<pk>"`` (``|`` and ``\\`` inside a key component are
+backslash-escaped), so the same row ingested from two systems of record maps to
+the same id and the two copies can be compared for conflicts.
 
 Example:
     >>> mapper = RelationalSchemaMapper(
@@ -41,6 +42,8 @@ Example:
 """
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
+
+from ..utils.logging import get_logger
 
 Row = Dict[str, Any]
 TableInput = Union[Sequence[Row], Any]
@@ -87,10 +90,14 @@ class RelationalSchemaMapper:
         foreign_keys: Explicit foreign keys, ``[{"table", "column",
             "references": (table, column), "predicate" (optional)}]``. This is the
             required fallback for warehouses where constraints are informational
-            or absent. ``predicate`` defaults to the referenced table's name.
+            or absent. ``predicate`` defaults to the referenced table's name. The
+            referenced column must be that table's primary key (entity ids come
+            from it), so a key into any other column is a ``ValueError``.
         schema: The dict returned by ``DBIngestor.get_database_schema()``; its
             ``foreign_keys`` entries (SQLAlchemy inspector dicts) are used when no
-            explicit foreign key covers the same column. The ingestor does not
+            explicit foreign key covers the same column. Constraints that point
+            at anything but an entity table's whole primary key are skipped with
+            a warning. The ingestor does not
             record which table a constraint belongs to, so a ``table_name`` /
             ``table`` key is used when present and the owning table is otherwise
             inferred from which mapped table has the column.
@@ -102,6 +109,7 @@ class RelationalSchemaMapper:
         foreign_keys: Optional[Iterable[Mapping[str, Any]]] = None,
         schema: Optional[Mapping[str, Any]] = None,
     ) -> None:
+        self.logger = get_logger("schema_mapper")
         self.entity_tables: Dict[str, Dict[str, Any]] = {}
         for table, spec in entity_tables.items():
             if not spec.get("pk"):
@@ -139,6 +147,17 @@ class RelationalSchemaMapper:
                 f"foreign key on {table}.{column} references {ref_table!r}, "
                 "which is not an entity table"
             )
+        pk = self.entity_tables[ref_table]["pk"]
+        if [ref_column] != pk:
+            why = (
+                "a composite primary key cannot be referenced"
+                if len(pk) > 1
+                else "a foreign key must reference the primary key"
+            )
+            raise ValueError(
+                f"foreign key on {table}.{column} references {ref_table}.{ref_column}, "
+                f"but {ref_table!r} entity ids come from {pk}; {why}"
+            )
         return {
             "table": table,
             "column": column,
@@ -159,6 +178,21 @@ class RelationalSchemaMapper:
                 yield None
                 continue
             if ref_table not in self.entity_tables:
+                yield None
+                continue
+            # a constraint on a unique non-key column has no entity id to point at
+            pk = self.entity_tables[ref_table]["pk"]
+            if list(ref_columns) != pk:
+                self.logger.warning(
+                    "skipping schema foreign key %s.%s -> %s.%s: %r entity ids "
+                    "come from %s",
+                    fk.get("table_name") or fk.get("table") or "?",
+                    columns[0],
+                    ref_table,
+                    ref_columns[0],
+                    ref_table,
+                    pk,
+                )
                 yield None
                 continue
             yield {
@@ -186,7 +220,11 @@ class RelationalSchemaMapper:
             owner = fk["table"]
             if owner is not None and owner != table:
                 continue
-            if fk["column"] in covered or fk["column"] not in column_set:
+            if fk["column"] in covered:
+                continue
+            # a key recorded against this table is kept while the table is empty;
+            # once there are columns, recorded and inferred keys both need theirs
+            if fk["column"] not in column_set and (owner is None or column_set):
                 continue
             # the referenced table carries that key column itself; without an
             # owning table recorded, do not read it as a self-reference.
@@ -209,7 +247,9 @@ class RelationalSchemaMapper:
 
         ``rows`` may be a list of dicts, an ingestor result exposing ``.data`` or
         ``.rows`` (Snowflake, Databricks, DBIngestor) or ``.dataframe``
-        (PandasIngestor), or a pandas DataFrame. Tables listed in
+        (PandasIngestor), one of the ``{"columns", "row_count", "rows"}``
+        dicts in ``DBIngestor.ingest_database()["tables"]``, or a pandas
+        DataFrame. Tables listed in
         ``entity_tables`` produce entities; other tables must be junction tables
         held together by exactly two foreign keys and produce relationships only.
         """
@@ -249,7 +289,7 @@ class RelationalSchemaMapper:
         key_values = [row.get(column) for column in spec["pk"]]
         if any(_is_missing(value) for value in key_values):
             return None
-        pk = "|".join(_key_text(value).replace("|", "\\|") for value in key_values)
+        pk = _pk_text(key_values)
         name_column = spec["name"]
         name = row.get(name_column) if name_column else None
         entity: Dict[str, Any] = {
@@ -330,7 +370,7 @@ class RelationalSchemaMapper:
         value = row.get(fk["column"])
         if _is_missing(value):
             return None
-        return f"{self.entity_tables[fk['ref_table']]['type']}:{_key_text(value)}"
+        return f"{self.entity_tables[fk['ref_table']]['type']}:{_pk_text([value])}"
 
 
 # ---------------------------------------------------------------------- helpers
@@ -340,6 +380,8 @@ def _rows_of(raw: TableInput) -> List[Row]:
     """Accept row dicts, ingestor results, or a DataFrame."""
     if isinstance(raw, (list, tuple)):
         return [_without_missing(dict(row)) for row in raw]
+    if isinstance(raw, Mapping) and isinstance(raw.get("rows"), (list, tuple)):
+        return [_without_missing(dict(row)) for row in raw["rows"]]
     for attribute in ("data", "rows"):
         value = getattr(raw, attribute, None)
         if isinstance(value, (list, tuple)):
@@ -365,6 +407,15 @@ def _is_missing(value: Any) -> bool:
     except (TypeError, ValueError):
         # lists and other non-scalars
         return False
+
+
+def _pk_text(values: Iterable[Any]) -> str:
+    """Join key components so that ``|`` and ``\\`` inside a component cannot
+    make two keys read as one; used for entity ids and relationship targets
+    alike so the two always agree."""
+    return "|".join(
+        _key_text(value).replace("\\", "\\\\").replace("|", "\\|") for value in values
+    )
 
 
 def _key_text(value: Any) -> str:
