@@ -4012,17 +4012,28 @@ class ContextGraph:
         
         Args:
             decision_id: Starting decision ID
-            direction: "upstream" or "downstream"
-            max_depth: Maximum traversal depth
-            
+            direction: "upstream", "downstream" or "both" (the upstream
+                chain followed by the downstream one, each decision tagged
+                with metadata["causal_direction"])
+            max_depth: Maximum traversal depth, per direction
+
         Returns:
             List of decisions in causal chain
         """
         from .decision_models import Decision
-        
+
+        if direction == "both":
+            upstream = self.get_causal_chain(decision_id, "upstream", max_depth)
+            downstream = self.get_causal_chain(decision_id, "downstream", max_depth)
+            for side, chain in (("upstream", upstream), ("downstream", downstream)):
+                for d in chain:
+                    d.metadata["causal_direction"] = side
+            seen = {d.decision_id for d in upstream}
+            return upstream + [d for d in downstream if d.decision_id not in seen]
+
         if direction not in ["upstream", "downstream"]:
-            raise ValueError("Direction must be 'upstream' or 'downstream'")
-        
+            raise ValueError("Direction must be 'upstream', 'downstream' or 'both'")
+
         # BFS traversal
         visited = set()
         queue = deque([(decision_id, 0)])

@@ -100,9 +100,11 @@ class CausalChainAnalyzer:
         
         Args:
             decision_id: Starting decision ID
-            direction: "upstream" (what caused this) or "downstream" (what this caused)
-            max_depth: Maximum traversal depth
-            
+            direction: "upstream" (what caused this), "downstream" (what this caused)
+                or "both" (the upstream chain followed by the downstream one, each
+                decision tagged with metadata["causal_direction"])
+            max_depth: Maximum traversal depth, per direction
+
         Returns:
             List of decisions in causal chain
         """
@@ -117,8 +119,17 @@ class CausalChainAnalyzer:
             if not (1 <= max_depth <= 100):
                 raise ValueError("max_depth must be between 1 and 20")
 
+            if direction == "both":
+                upstream = self.get_causal_chain(decision_id, "upstream", max_depth)
+                downstream = self.get_causal_chain(decision_id, "downstream", max_depth)
+                for side, chain in (("upstream", upstream), ("downstream", downstream)):
+                    for d in chain:
+                        d.metadata["causal_direction"] = side
+                seen = {d.decision_id for d in upstream}
+                return upstream + [d for d in downstream if d.decision_id not in seen]
+
             if direction not in ["upstream", "downstream"]:
-                raise ValueError("Direction must be 'upstream' or 'downstream'")
+                raise ValueError("Direction must be 'upstream', 'downstream' or 'both'")
             
             # Define relationship direction based on traversal direction
             if direction == "upstream":
