@@ -145,15 +145,27 @@ class TestCausalChainAnalyzer:
                 "distance": distance,
             }
 
+        # Query results come nearest first, as RETURN DISTINCT end, length(path)
+        # ... ORDER BY distance gives them; a decision reached by two paths of
+        # different length comes back twice.
         mock_graph_store.execute_query.side_effect = [
-            [record("decision_001", 1)],  # upstream
+            [
+                record("decision_001", 1),
+                record("decision_000", 2),
+                record("decision_000", 3),  # same cause by a longer path
+            ],  # upstream
             [record("decision_003", 1), record("decision_001", 2)],  # downstream, with a cycle
         ]
 
         chain = causal_analyzer.get_causal_chain("decision_002", "both", 5)
 
-        assert [d.decision_id for d in chain] == ["decision_001", "decision_003"]
-        assert [d.metadata["causal_direction"] for d in chain] == ["upstream", "downstream"]
+        # Causes farthest first (as ContextGraph orders them), then effects;
+        # every decision once, at its nearest distance.
+        assert [d.decision_id for d in chain] == ["decision_000", "decision_001", "decision_003"]
+        assert [d.metadata["causal_distance"] for d in chain] == [2, 1, 1]
+        assert [d.metadata["causal_direction"] for d in chain] == [
+            "upstream", "upstream", "downstream"
+        ]
         queries = [call.args[0] for call in mock_graph_store.execute_query.call_args_list]
         assert len(queries) == 2
         assert "<-[:CAUSED" in queries[0]

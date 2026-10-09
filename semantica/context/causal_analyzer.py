@@ -5,7 +5,7 @@ Analyzes decision causality, influence chains, and precedent relationships using
 graph traversal and advanced analytics.
 
 Key Features:
-    - Causal chain tracing (upstream/downstream)
+    - Causal chain tracing (upstream, downstream or both)
     - Decision influence analysis and scoring
     - Precedent relationship mapping
     - Multi-directional causality analysis
@@ -102,7 +102,10 @@ class CausalChainAnalyzer:
             decision_id: Starting decision ID
             direction: "upstream" (what caused this), "downstream" (what this caused)
                 or "both" (the upstream chain followed by the downstream one, each
-                decision tagged with metadata["causal_direction"])
+                decision listed once and tagged with metadata["causal_direction"]).
+                With "both", causes come farthest first and effects nearest first,
+                matching ContextGraph. A plain "upstream" query against a graph
+                store returns nearest first; ContextGraph returns it farthest first.
             max_depth: Maximum traversal depth, per direction
 
         Returns:
@@ -120,13 +123,24 @@ class CausalChainAnalyzer:
                 raise ValueError("max_depth must be between 1 and 20")
 
             if direction == "both":
-                upstream = self.get_causal_chain(decision_id, "upstream", max_depth)
-                downstream = self.get_causal_chain(decision_id, "downstream", max_depth)
-                for side, chain in (("upstream", upstream), ("downstream", downstream)):
-                    for d in chain:
-                        d.metadata["causal_direction"] = side
-                seen = {d.decision_id for d in upstream}
-                return upstream + [d for d in downstream if d.decision_id not in seen]
+                # Each query returns nearest first, so the first copy of a
+                # decision is the nearest one; it is kept once across both sides.
+                chain, seen = [], set()
+                for side in ("upstream", "downstream"):
+                    for d in self.get_causal_chain(decision_id, side, max_depth):
+                        if d.decision_id not in seen:
+                            seen.add(d.decision_id)
+                            d.metadata["causal_direction"] = side
+                            chain.append(d)
+                # Causes farthest first, then effects nearest first, as
+                # ContextGraph.get_causal_chain orders them.
+                n_up = sum(d.metadata["causal_direction"] == "upstream" for d in chain)
+                chain[:n_up] = sorted(
+                    chain[:n_up],
+                    key=lambda d: d.metadata.get("causal_distance", 0),
+                    reverse=True,
+                )
+                return chain
 
             if direction not in ["upstream", "downstream"]:
                 raise ValueError("Direction must be 'upstream', 'downstream' or 'both'")
