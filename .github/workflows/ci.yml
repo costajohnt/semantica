@@ -27,7 +27,7 @@ jobs:
     outputs:
       src: ${{ steps.filter.outputs.src }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Fetch enough history to compute the merge base against the PR base.
           fetch-depth: 0
@@ -71,11 +71,11 @@ jobs:
       )
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -145,7 +145,11 @@ jobs:
           pytest -q tests/explorer/test_explorer_deterministic_rendering_e2e.py
       - name: Install pinned Python dependencies
         run: |
-          pip install -r requirements-ci.txt --require-hashes
+          # --no-deps: requirements-ci.txt carries pillow 13 through the
+          # [tool.uv] override-dependencies entry, which fastembed's declared
+          # pillow<13.0 rejects, so pip's resolver refuses the set. Every
+          # transitive dep is already hash-pinned in the file.
+          pip install -r requirements-ci.txt --require-hashes --no-deps
       # The steps around this one each cover a slice: the reasoning suite above,
       # the two integration directories at the end of the job. Everything else
       # under tests/ has no gate at all, so a regression there is only found by
