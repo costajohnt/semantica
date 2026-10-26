@@ -160,7 +160,8 @@ class TestCausalChainAnalyzer:
         chain = causal_analyzer.get_causal_chain("decision_002", "both", 5)
 
         # Causes farthest first (as ContextGraph orders them), then effects;
-        # every decision once, at its nearest distance.
+        # every decision once; within a side the nearest copy is kept, and a
+        # decision reachable both ways is listed as upstream.
         assert [d.decision_id for d in chain] == ["decision_000", "decision_001", "decision_003"]
         assert [d.metadata["causal_distance"] for d in chain] == [2, 1, 1]
         assert [d.metadata["causal_direction"] for d in chain] == [

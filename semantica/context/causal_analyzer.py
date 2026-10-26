@@ -123,8 +123,9 @@ class CausalChainAnalyzer:
                 raise ValueError("max_depth must be between 1 and 20")
 
             if direction == "both":
-                # Each query returns nearest first, so the first copy of a
-                # decision is the nearest one; it is kept once across both sides.
+                # Each query returns nearest first, so within a side the first
+                # copy is the nearest; a decision reachable both ways is kept as
+                # upstream.
                 chain, seen = [], set()
                 for side in ("upstream", "downstream"):
                     for d in self.get_causal_chain(decision_id, side, max_depth):
